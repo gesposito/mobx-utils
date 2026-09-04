@@ -3,6 +3,7 @@ import {
     IComputedValue,
     IComputedValueOptions,
     computed,
+    onBecomeObserved,
     onBecomeUnobserved,
     _isComputingDerivation,
     isAction,
@@ -92,14 +93,31 @@ export function computedFn<T extends (...args: any[]) => any>(
                 name: `computedFn(${opts.name || fn.name}#${++i})`,
             }
         )
-        entry.set(c)
-        // clean up if no longer observed
-        if (!opts.keepAlive)
+        if (opts.keepAlive) {
+            entry.set(c)
+        } else {
+            // Only cache the entry once the `computed` actually becomes observed, that is when
+            // a reaction (or a `keepAlive` `computed`) tracks it. That is also the condition for
+            // `onBecomeUnobserved` to fire later, so every cached entry is evicted again.
+            // Merely being `computed` inside an `action` or an `untracked` scope does not make the
+            // `computed` observed: caching it there would keep the entry and its arguments
+            // alive forever, since nothing would ever evict it.
+            const disposeArm = onBecomeObserved(c, () => {
+                // the entry can already exist if the `computed` went unobserved and observed
+                // again within one batch (the pending eviction is cancelled in that case)
+                const e = d.entry(args)
+                if (!e.exists()) e.set(c)
+            })
+            // clean up if no longer observed
             onBecomeUnobserved(c, () => {
-                d.entry(args).delete()
+                // only evict the entry this computed owns
+                const e = d.entry(args)
+                if (e.exists() && e.get() === c) e.delete()
+                disposeArm()
                 if (opts.onCleanup) opts.onCleanup(latestValue, ...args)
                 latestValue = undefined
             })
+        }
         // return current val
         return c.get()
     } as any

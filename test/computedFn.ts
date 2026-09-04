@@ -7,6 +7,8 @@ import {
     getDependencyTree,
     comparer,
     getObserverTree,
+    computed,
+    runInAction,
 } from "mobx"
 
 const john = {
@@ -193,4 +195,77 @@ test("supports onCleanup", () => {
 
 test("should not allow actions", () => {
     expect(() => computedFn(action(() => {}))).toThrow("action")
+})
+
+test("does not cache entries that are only read inside an action", () => {
+    const events: string[] = []
+    const unloaded: unknown[] = []
+    const store = observable({ x: 1 })
+    const double = computedFn(
+        (n: number) => {
+            events.push("calc " + n)
+            return store.x * n
+        },
+        { onCleanup: (result, n) => unloaded.push([result, n]) }
+    )
+
+    // A `computed` that is evaluated inside an `action`, without a `reaction` tracking it, never
+    // becomes observed, so its `onBecomeUnobserved` would never fire: nothing may be cached for it.
+    runInAction(() => {
+        expect(computed(() => double(2)).get()).toBe(2)
+    })
+    expect(events).toEqual(["calc 2"])
+    expect(unloaded).toEqual([])
+
+    // The next read outside a derivation takes the uncached path, instead of hitting an entry
+    // that could never be evicted.
+    expect(double(2)).toBe(2)
+    expect(events).toEqual(["calc 2", "calc 2"])
+    expect(unloaded).toEqual([[2, 2]])
+})
+
+test("caches and evicts normally after the same arguments were read inside an action", () => {
+    const events: string[] = []
+    const unloaded: unknown[] = []
+    const store = observable({ x: 1 })
+    const double = computedFn(
+        (n: number) => {
+            events.push("calc " + n)
+            return store.x * n
+        },
+        { onCleanup: (result, n) => unloaded.push([result, n]) }
+    )
+
+    runInAction(() => computed(() => double(2)).get())
+    const d = autorun(() => events.push("autorun " + double(2)))
+    // served from the entry created by the autorun
+    expect(double(2)).toBe(2)
+    runInAction(() => {
+        store.x = 2
+    })
+    d()
+
+    expect(events).toEqual(["calc 2", "calc 2", "autorun 2", "calc 2", "autorun 4"])
+    expect(unloaded).toEqual([[4, 2]])
+})
+
+test("caches nested computedFn calls while observed", () => {
+    const events: string[] = []
+    const store = observable({ x: 1, y: 1 })
+    const inner = computedFn((n: number) => {
+        events.push("inner " + n)
+        return store.x * n
+    })
+    const outer = computedFn((n: number) => {
+        events.push("outer " + n)
+        return inner(n) + store.y
+    })
+
+    const d = autorun(() => events.push("autorun " + outer(2)))
+    runInAction(() => {
+        store.y = 2
+    })
+    d()
+
+    expect(events).toEqual(["outer 2", "inner 2", "autorun 3", "outer 2", "autorun 4"])
 })
