@@ -209,19 +209,21 @@ test("does not cache entries that are only read inside an action", () => {
         { onCleanup: (result, n) => unloaded.push([result, n]) }
     )
 
-    // A `computed` that is evaluated inside an `action`, without a `reaction` tracking it, never
-    // becomes observed, so its `onBecomeUnobserved` would never fire: nothing may be cached for it.
+    // a computed read inside an action is a derivation, but nothing observes it: not cached,
+    // cleaned up immediately like any untracked call
     runInAction(() => {
         expect(computed(() => double(2)).get()).toBe(2)
     })
     expect(events).toEqual(["calc 2"])
-    expect(unloaded).toEqual([])
+    expect(unloaded).toEqual([[2, 2]])
 
-    // The next read outside a derivation takes the uncached path, instead of hitting an entry
-    // that could never be evicted.
+    // an untracked read takes the same path instead of hitting a pinned entry
     expect(double(2)).toBe(2)
     expect(events).toEqual(["calc 2", "calc 2"])
-    expect(unloaded).toEqual([[2, 2]])
+    expect(unloaded).toEqual([
+        [2, 2],
+        [2, 2],
+    ])
 })
 
 test("caches and evicts normally after the same arguments were read inside an action", () => {
@@ -246,7 +248,39 @@ test("caches and evicts normally after the same arguments were read inside an ac
     d()
 
     expect(events).toEqual(["calc 2", "calc 2", "autorun 2", "calc 2", "autorun 4"])
-    expect(unloaded).toEqual([[4, 2]])
+    expect(unloaded).toEqual([
+        [2, 2],
+        [4, 2],
+    ])
+})
+
+test("cleans up a value computed by an observed computed inside an action exactly once", () => {
+    const events: string[] = []
+    const unloaded: unknown[] = []
+    const store = observable({ x: 1 })
+    const tenfold = computedFn(
+        (n: number) => {
+            events.push("calc " + n)
+            return n * 10
+        },
+        { onCleanup: (result, n) => unloaded.push([result, n]) }
+    )
+    const k = computed(() => tenfold(store.x))
+
+    const d = autorun(() => events.push("autorun " + k.get()))
+    // recomputed inside the action with a new argument: MobX 6 does not treat this as observed
+    // (MobX 7 does since 7.0.4), so the value is cleaned up either immediately or on eviction
+    runInAction(() => {
+        store.x = 2
+        expect(k.get()).toBe(20)
+    })
+    d()
+
+    expect(events).toEqual(["calc 1", "autorun 10", "calc 2", "autorun 20"])
+    expect(unloaded.sort()).toEqual([
+        [10, 1],
+        [20, 2],
+    ])
 })
 
 test("caches nested computedFn calls while observed", () => {

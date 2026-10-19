@@ -3,7 +3,6 @@ import {
     IComputedValue,
     IComputedValueOptions,
     computed,
-    onBecomeObserved,
     onBecomeUnobserved,
     _isComputingDerivation,
     isAction,
@@ -67,7 +66,9 @@ export function computedFn<T extends (...args: any[]) => any>(
         // cache hit, return
         if (entry.exists()) return entry.get().get()
         // if function is invoked, and its a cache miss without reactive, there is no point in caching...
-        if (!opts.keepAlive && !_isComputingDerivation()) {
+        // a derivation without a tracking context (e.g. a computed read inside an action) is not reactive
+        // either: the entry would never become observed, so it would never be cleaned up. See #319
+        if (!opts.keepAlive && (!_isComputingDerivation() || !_getGlobalState().trackingContext)) {
             if (
                 !memoWarned &&
                 (opts.requiresReaction ?? _getGlobalState().computedRequiresReaction)
@@ -93,31 +94,14 @@ export function computedFn<T extends (...args: any[]) => any>(
                 name: `computedFn(${opts.name || fn.name}#${++i})`,
             }
         )
-        if (opts.keepAlive) {
-            entry.set(c)
-        } else {
-            // Only cache the entry once the `computed` actually becomes observed, that is when
-            // a reaction (or a `keepAlive` `computed`) tracks it. That is also the condition for
-            // `onBecomeUnobserved` to fire later, so every cached entry is evicted again.
-            // Merely being `computed` inside an `action` or an `untracked` scope does not make the
-            // `computed` observed: caching it there would keep the entry and its arguments
-            // alive forever, since nothing would ever evict it.
-            const disposeArm = onBecomeObserved(c, () => {
-                // the entry can already exist if the `computed` went unobserved and observed
-                // again within one batch (the pending eviction is cancelled in that case)
-                const e = d.entry(args)
-                if (!e.exists()) e.set(c)
-            })
-            // clean up if no longer observed
+        entry.set(c)
+        // clean up if no longer observed
+        if (!opts.keepAlive)
             onBecomeUnobserved(c, () => {
-                // only evict the entry this computed owns
-                const e = d.entry(args)
-                if (e.exists() && e.get() === c) e.delete()
-                disposeArm()
+                d.entry(args).delete()
                 if (opts.onCleanup) opts.onCleanup(latestValue, ...args)
                 latestValue = undefined
             })
-        }
         // return current val
         return c.get()
     } as any
